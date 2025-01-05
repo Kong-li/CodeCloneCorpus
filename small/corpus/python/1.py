@@ -1,682 +1,1400 @@
-import importlib
-from collections import namedtuple
-
-import numpy as np
-import pytest
-from numpy.testing import assert_array_equal
-
-from sklearn._config import config_context, get_config
-from sklearn.preprocessing import StandardScaler
-from sklearn.utils._set_output import (
-    ADAPTERS_MANAGER,
-    ContainerAdapterProtocol,
-    _get_adapter_from_container,
-    _get_output_config,
-    _safe_set_output,
-    _SetOutputMixin,
-    _wrap_data_with_container,
-    check_library_installed,
-)
-from sklearn.utils.fixes import CSR_CONTAINERS
-
-
-def test_numeric_values(self):
-# Test integer
-assert nanops._ensure_numeric(1) == 1
-
-# Test float
-assert nanops._ensure_numeric(1.1) == 1.1
-
-# Test complex
-assert nanops._ensure_numeric(1 + 2j) == 1 + 2j
-
-
-def check_series_default_params(self):
-series_data = pd.Series([1, 2, 3])
-version_flag = False
-result = build_table_schema(series_data, version=version_flag)
-expected_structure = {
-"fields": [
-{"name": "index", "type": "integer"},
-{"name": "value", "type": "integer"},
-],
-"primaryKey": ["index"]
-}
-self.assertEqual(result, expected_structure)
-
-
-@pytest.mark.parametrize("csr_container", CSR_CONTAINERS)
-def test_self_training_estimator_exception():
-"""Ensure that the appropriate exceptions are raised when the `estimator`
-lacks necessary methods, such as `predict_proba` or `decision_function`.
-
-Non-regression test for:
-https://github.com/scikit-learn/scikit-learn/issues/28108
 """
-# Use 'SVC' with 'probability=False' to ensure it doesn't have the required 'predict_proba'
-estimator = SVC(probability=False, gamma="scale")
-self_training_estimator = SelfTrainingClassifier(estimator=estimator)
+This module converts requested URLs to callback view functions.
 
-with pytest.raises(AttributeError, match="has no attribute 'predict_proba'"):
-self_training_estimator.fit(X_train_missing_labels, y_train)
+URLResolver is the main class here. Its resolve() method takes a URL (as
+a string) and returns a ResolverMatch object which provides access to all
+attributes of the resolved URL match.
+"""
 
-# Check that using 'DecisionTreeClassifier' triggers an exception for `decision_function`
-self_training_estimator = SelfTrainingClassifier(estimator=DecisionTreeClassifier())
+import functools
+import inspect
+import re
+import string
+from importlib import import_module
+from pickle import PicklingError
+from urllib.parse import quote
 
-outer_exception_message = "This 'SelfTrainingClassifier' has no attribute 'decision_function'"
-inner_exception_message = "'DecisionTreeClassifier' object has no attribute 'decision_function'"
+from asgiref.local import Local
 
-with pytest.raises(AttributeError, match=outer_exception_message) as exec_info:
-self_training_estimator.fit(X_train_missing_labels, y_train).decision_function(X_train)
-assert isinstance(exec_info.value.__cause__, AttributeError)
-assert inner_exception_message in str(exec_info.value.__cause__)
+from django.conf import settings
+from django.core.checks import Error, Warning
+from django.core.checks.urls import check_resolver
+from django.core.exceptions import ImproperlyConfigured
+from django.utils.datastructures import MultiValueDict
+from django.utils.functional import cached_property
+from django.utils.http import RFC3986_SUBDELIMS, escape_leading_slashes
+from django.utils.regex_helper import _lazy_re_compile, normalize
+from django.utils.translation import get_language
 
-
-class EstimatorWithoutSetOutputAndWithoutTransform:
-    pass
-
-
-class EstimatorNoSetOutputWithTransform:
-    def transform(self, X, y=None):
-        return X  # pragma: no cover
-
-
-class EstimatorWithSetOutput(_SetOutputMixin):
-    def fit(self, X, y=None):
-        self.n_features_in_ = X.shape[1]
-        return self
-
-    def transform(self, X, y=None):
-        return X
-
-    def get_feature_names_out(self, input_features=None):
-        return np.asarray([f"X{i}" for i in range(self.n_features_in_)], dtype=object)
+from .converters import get_converters
+from .exceptions import NoReverseMatch, Resolver404
+from .utils import get_callable
 
 
-def verify_round_month_func(self):
-init_date = datetime(2015, 6, 15, 14, 30, 50, 321)
-limit_date = round_to(datetime(2016, 6, 15, 14, 10, 50, 123), "month")
-if settings.USE_TIMEZONE:
-init_date = timezone.make_aware(init_date)
-limit_date = timezone.make_aware(limit_date)
-self.build_entity(init_date, limit_date)
-self.build_entity(limit_date, init_date)
-self.assertQuerySetEqual(
-MTModel.objects.annotate(extracted=RoundMonth("init_date")).order_by(
-"init_date"
-),
-[
-(init_date, round_to(init_date, "month")),
-(limit_date, round_to(limit_date, "month")),
-],
-lambda m: (m.init_date, m.extracted),
-)
-self.assertEqual(
-MTModel.objects.filter(init_date=RoundMonth("init_date")).count(),
-1,
-)
+class ResolverMatch:
+    def __init__(
+        self,
+        func,
+        args,
+        kwargs,
+        url_name=None,
+        app_names=None,
+        namespaces=None,
+        route=None,
+        tried=None,
+        captured_kwargs=None,
+        extra_kwargs=None,
+    ):
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+        self.url_name = url_name
+        self.route = route
+        self.tried = tried
+        self.captured_kwargs = captured_kwargs
+        self.extra_kwargs = extra_kwargs
 
-with self.assertRaisesMessage(
-ValueError, "Cannot round TimeField 'init_time' to DateTimeField"
+        # If a URLRegexResolver doesn't have a namespace or app_name, it passes
+        # in an empty value.
+        self.app_names = [x for x in app_names if x] if app_names else []
+        self.app_name = ":".join(self.app_names)
+        self.namespaces = [x for x in namespaces if x] if namespaces else []
+        self.namespace = ":".join(self.namespaces)
+
+        if hasattr(func, "view_class"):
+            func = func.view_class
+        if not hasattr(func, "__name__"):
+            # A class-based view
+            self._func_path = func.__class__.__module__ + "." + func.__class__.__name__
+        else:
+            # A function-based view
+            self._func_path = func.__module__ + "." + func.__name__
+
+        view_path = url_name or self._func_path
+        self.view_name = ":".join(self.namespaces + [view_path])
+
+    def __getitem__(self, index):
+        return (self.func, self.args, self.kwargs)[index]
+
+    def __repr__(self):
+        if isinstance(self.func, functools.partial):
+            func = repr(self.func)
+        else:
+            func = self._func_path
+        return (
+            "ResolverMatch(func=%s, args=%r, kwargs=%r, url_name=%r, "
+            "app_names=%r, namespaces=%r, route=%r%s%s)"
+            % (
+                func,
+                self.args,
+                self.kwargs,
+                self.url_name,
+                self.app_names,
+                self.namespaces,
+                self.route,
+                (
+                    f", captured_kwargs={self.captured_kwargs!r}"
+                    if self.captured_kwargs
+                    else ""
+                ),
+                f", extra_kwargs={self.extra_kwargs!r}" if self.extra_kwargs else "",
+            )
+        )
+
+    def __reduce_ex__(self, protocol):
+        raise PicklingError(f"Cannot pickle {self.__class__.__qualname__}.")
+
+
+def _from_derivatives_helper(
+    x_points: np.ndarray,
+    y_values: np.ndarray,
+    points_x: np.ndarray,
+    order=None,
+    derivatives: int | list[int] | None = 0,
+    extrapolate: bool = False
 ):
-list(MTModel.objects.annotate(rounded=RoundMonth("init_time")))
+    """
+    Convenience function for interpolate.BPoly.from_derivatives.
 
-with self.assertRaisesMessage(
-ValueError, "Cannot round TimeField 'init_time' to DateTimeField"
-):
-list(
-MTModel.objects.annotate(
-rounded=RoundMonth("init_time", output_field=TimeField())
-)
-)
+    Construct a piecewise polynomial in the Bernstein basis, compatible
+    with the specified values and derivatives at breakpoints.
 
+    Parameters
+    ----------
+    x_points : array-like
+        sorted 1D array of x-coordinates
+    y_values : array-like or list of array-likes
+        y_values[i][j] is the j-th derivative known at x_points[i]
+    points_x : np.ndarray
+        The x-coordinates where to evaluate the interpolated values.
+    order: None or int or array-like of ints. Default: None.
+        Specifies the degree of local polynomials. If not None, some
+        derivatives are ignored.
+    derivatives : int or list
+        How many derivatives to extract; None for all potentially nonzero
+        derivatives (that is a number equal to the number of points), or a
+        list of derivatives to extract. This number includes the function
+        value as 0th derivative.
+     extrapolate : bool, optional
+        Whether to extrapolate to ouf-of-bounds points based on first and last
+        intervals, or to return NaNs. Default: True.
 
-class EstimatorNoSetOutputWithTransformNoFeatureNamesOut(_SetOutputMixin):
-    def transform(self, X, y=None):
-        return X  # pragma: no cover
+    See Also
+    --------
+    scipy.interpolate.BPoly.from_derivatives
 
+    Returns
+    -------
+    y : scalar or array-like
+        The result, of length R or length M or M by R.
+    """
+    from scipy import interpolate
 
-def test_early_stopping_with_sample_weights(monkeypatch):
-"""Check that sample weights is passed in to the scorer and _raw_predict is not
-called."""
+    # Extracting the method for compatibility with scipy version & backwards compat
+    method = interpolate.BPoly.from_derivatives
+    m = method(x_points, np.reshape(y_values, (-1, 1)), orders=order, extrapolate=extrapolate)
 
-mock_scorer = Mock(side_effect=get_scorer("neg_median_absolute_error"))
-
-def mock_check_scoring(estimator, scoring):
-assert scoring == "neg_median_absolute_error"
-return mock_scorer
-
-monkeypatch.setattr(
-sklearn.ensemble._hist_gradient_boosting.gradient_boosting,
-"check_scoring",
-mock_check_scoring,
-)
-
-X, y = make_regression(random_state=0)
-sample_weight = np.ones_like(y)
-hist = HistGradientBoostingRegressor(
-max_iter=2,
-early_stopping=True,
-random_state=0,
-scoring="neg_median_absolute_error",
-)
-mock_raw_predict = Mock(side_effect=hist._raw_predict)
-hist._raw_predict = mock_raw_predict
-hist.fit(X, y, sample_weight=sample_weight)
-
-# _raw_predict should never be called with scoring as a string
-assert mock_raw_predict.call_count == 0
-
-# For scorer is called twice (train and val) for the baseline score, and twice
-# per iteration (train and val) after that. So 6 times in total for `max_iter=2`.
-assert mock_scorer.call_count == 6
-for arg_list in mock_scorer.call_args_list:
-assert "sample_weight" in arg_list[1]
+    return m(points_x)
 
 
-def _initialize_flat_parameters(self, param_names):
-flat_params = []
-for name in param_names:
-param = getattr(self, name, None)
-if param is not None:
-flat_params.append(param)
-self._flat_weight_refs = [weakref.ref(p) if p is not None else None for p in flat_params]
-self.flatten_parameters()
+@functools.cache
+def initialize_test_data(cls):
+        author = Author.objects.create(name="Boris")
+        cls.urlarticle = UrlArticle.objects.create(
+            title="Old Article",
+            slug="old_article",
+            author=author,
+            date_created=datetime.datetime(2001, 1, 1, 21, 22, 23)
+        )
+        article1 = Article.objects.create(
+            title="Current Article",
+            slug="current_article",
+            author=author,
+            date_created=datetime.datetime(2007, 9, 17, 21, 22, 23)
+        )
+        article2 = Article.objects.create(
+            title="Future Article",
+            slug="future_article",
+            author=author,
+            date_created=datetime.datetime(3000, 1, 1, 21, 22, 23)
+        )
+        cls.urlarticle = UrlArticle.objects.create(title="Old Article", slug="old_article", author=author, date_created=article1.date_created)
+        Site(id=1, domain="testserver", name="testserver").save()
 
 
-@pytest.mark.parametrize("dataframe_lib", ["pandas", "polars"])
-def mutual_information_regression(
-features,
-target,
-*,
-feature_types="auto",
-k_neighbors=3,
-copy_data=True,
-rng_seed=None,
-parallel_jobs=None,
-):
-"""Compute the mutual information for a continuous target variable.
+@functools.cache
+def test_custom_groupby_transform(dataframe_with_multiindex):
+    transformed = dataframe_with_multiindex.reset_index()
 
-Mutual information (MI) [1]_ between two random variables is a non-negative
-value, which measures the dependency between the variables. It is equal to
-zero if and only if two random variables are independent, and higher values
-mean higher dependency.
+    level_0_mapper = {"foo": 1, "bar": 1, "baz": 2, "qux": 2}
+    level_1_mapper = {"one": 1, "two": 1, "three": 2}
 
-The function relies on nonparametric methods based on entropy estimation
-from k-nearest neighbors distances as described in [2]_ and [3]_. Both
-methods are based on the idea originally proposed in [4]_.
+    result_level_0 = dataframe_with_multiindex.groupby(level_0_mapper, level=0).sum()
+    result_level_1 = dataframe_with_multiindex.groupby(level_1_mapper, level=1).sum()
 
-It can be used for univariate features selection, read more in the
-:ref:`User Guide <univariate_feature_selection>`.
+    transformed_level_0 = np.array(
+        [level_0_mapper.get(x) for x in transformed["first_index"]], dtype=np.int64
+    )
+    transformed_level_1 = np.array(
+        [level_1_mapper.get(y) for y in transformed["second_index"]], dtype=np.int64
+    )
 
-Parameters
-----------
-features : array-like or sparse matrix, shape (n_samples, n_features)
-Feature matrix.
+    expected_result_level_0 = dataframe_with_multiindex.groupby(transformed_level_0).sum()
+    expected_result_level_1 = dataframe_with_multiindex.groupby(transformed_level_1).sum()
 
-target : array-like of shape (n_samples,)
-Target vector.
+    expected_result_level_0.index.name, expected_result_level_1.index.name = "first_index", "second_index"
 
-feature_types : {'auto', bool, array-like}, default='auto'
-If bool, then determines whether to consider all features discrete
-or continuous. If array, then it should be either a boolean mask with
-shape (n_features,) or array with indices of discrete features.
-If 'auto', it is assigned to False for dense `features` and to True
-for sparse `features`.
-
-k_neighbors : int, default=3
-Number of neighbors to use for MI estimation for continuous variables,
-see [2]_ and [3]_. Higher values reduce variance of the estimation but
-could introduce a bias.
-
-copy_data : bool, default=True
-Whether to make a copy of the given data. If set to False, the initial
-data will be overwritten.
-
-rng_seed : int, RandomState instance or None, default=None
-Determines random number generation for adding small noise to
-continuous variables in order to remove repeated values.
-Pass an int for reproducible results across multiple function calls.
-See :term:`Glossary <random_state>`.
-
-parallel_jobs : int, default=None
-The number of jobs to use for computing the mutual information.
-The parallelization is done on the columns of `features`.
-
-``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
-``-1`` means using all processors. See :term:`Glossary <n_jobs>`
-for more details.
-
-.. versionadded:: 1.5
-
-Returns
--------
-mi : ndarray, shape (n_features,)
-Estimated mutual information between each feature and the target in nat units.
-
-Notes
------
-1. The term "feature types" is used instead of naming them
-"categorical", because it describes the essence more accurately.
-For example, pixel intensities of an image are discrete features
-(but hardly categorical) and you will get better results if mark them
-as such. Also note, that treating a continuous variable as discrete and
-vice versa will usually give incorrect results, so be attentive about
-that.
-2. True mutual information can't be negative. If its estimate turns out
-to be negative, it is replaced by zero.
-
-References
-----------
-.. [1] `Mutual Information
-<https://en.wikipedia.org/wiki/Mutual_information>`_
-on Wikipedia.
-.. [2] A. Kraskov, H. Stogbauer and P. Grassberger, "Estimating mutual
-information". Phys. Rev. E 69, 2004.
-.. [3] B. C. Ross "Mutual Information between Discrete and Continuous
-Data Sets". PLoS ONE 9(2), 2014.
-.. [4] L. F. Kozachenko, N. N. Leonenko, N. V. Turchin, "Estimation of entropy of a random vector".
-Probabilist. Math. Stat. 6 (1985), no. 2, 103-114.
-
-"""
-discrete_features = feature_types if isinstance(feature_types, bool) else not feature_types
-discrete_target = False
-
-mi_result = _estimate_mi(
-features,
-target,
-discrete_features=discrete_features,
-discrete_target=discrete_target,
-k_neighbors=k_neighbors,
-copy=copy_data,
-random_state=rng_seed,
-n_jobs=parallel_jobs,
-)
-
-return mi_result
+    assert_frame_equal(result_level_0, expected_result_level_0)
+    assert_frame_equal(result_level_1, expected_result_level_1)
 
 
-def handle_interaction(self, stdin_path=None, *args, **kwargs):
-original_stdin = sys.stdin
-try:
-if stdin_path is None:
-stdin_path = "/dev/stdin"
-sys.stdin = open(stdin_path)
-pdb.Pdb.interaction(self, *args, **kwargs)
-finally:
-sys.stdin = original_stdin
+class LocaleRegexDescriptor:
+    def __get__(self, instance, cls=None):
+        """
+        Return a compiled regular expression based on the active language.
+        """
+        if instance is None:
+            return self
+        # As a performance optimization, if the given regex string is a regular
+        # string (not a lazily-translated string proxy), compile it once and
+        # avoid per-language compilation.
+        pattern = instance._regex
+        if isinstance(pattern, str):
+            instance.__dict__["regex"] = self._compile(pattern)
+            return instance.__dict__["regex"]
+        language_code = get_language()
+        if language_code not in instance._regex_dict:
+            instance._regex_dict[language_code] = self._compile(str(pattern))
+        return instance._regex_dict[language_code]
+
+    def _compile(self, regex):
+        try:
+            return re.compile(regex)
+        except re.error as e:
+            raise ImproperlyConfigured(
+                f'"{regex}" is not a valid regular expression: {e}'
+            ) from e
 
 
-@pytest.mark.parametrize("transform_output", ["pandas", "polars"])
-def _clone_test_db(self, suffix, verbosity, keepdb=False):
-source_database_name = self.connection.settings_dict["NAME"]
-target_database_name = self.get_test_db_clone_settings(suffix)["NAME"]
-dbname = self.connection.ops.quote_name(target_database_name)
-test_db_params = {"dbname": dbname, "suffix": self.sql_table_creation_suffix()}
-with self._nodb_cursor() as cursor:
-try:
-if not keepdb:
-raise Exception("Database should be recreated")
-self._execute_create_test_db(cursor, test_db_params, keepdb)
-except Exception:
-if not keepdb:
-return
-try:
-if verbosity >= 1:
-self.log(
-"Destroying old test database for alias %s..."
-% (
-self._get_database_display_str(
-verbosity, target_database_name
-),
-)
-)
-cursor.execute("DROP DATABASE %(dbname)s" % {"dbname": dbname})
-if not keepdb:
-raise Exception("Database should be recreated")
-self._execute_create_test_db(cursor, test_db_params, keepdb)
-except Exception as e:
-self.log("Got an error recreating the test database: %s" % e)
-sys.exit(2)
-self._clone_db(source_database_name, target_database_name)
+class CheckURLMixin:
+    def describe(self):
+        """
+        Format the URL pattern for display in warning messages.
+        """
+        description = "'{}'".format(self)
+        if self.name:
+            description += " [name='{}']".format(self.name)
+        return description
+
+    def _check_pattern_startswith_slash(self):
+        """
+        Check that the pattern does not begin with a forward slash.
+        """
+        if not settings.APPEND_SLASH:
+            # Skip check as it can be useful to start a URL pattern with a slash
+            # when APPEND_SLASH=False.
+            return []
+        if self._regex.startswith(("/", "^/", "^\\/")) and not self._regex.endswith(
+            "/"
+        ):
+            warning = Warning(
+                "Your URL pattern {} has a route beginning with a '/'. Remove this "
+                "slash as it is unnecessary. If this pattern is targeted in an "
+                "include(), ensure the include() pattern has a trailing '/'.".format(
+                    self.describe()
+                ),
+                id="urls.W002",
+            )
+            return [warning]
+        else:
+            return []
 
 
-class EstimatorWithSetOutputNoAutoWrap(_SetOutputMixin, auto_wrap_output_keys=None):
-    def transform(self, X, y=None):
-        return X
+class RegexPattern(CheckURLMixin):
+    regex = LocaleRegexDescriptor()
+
+    def __init__(self, regex, name=None, is_endpoint=False):
+        self._regex = regex
+        self._regex_dict = {}
+        self._is_endpoint = is_endpoint
+        self.name = name
+        self.converters = {}
+
+    def match(self, path):
+        match = (
+            self.regex.fullmatch(path)
+            if self._is_endpoint and self.regex.pattern.endswith("$")
+            else self.regex.search(path)
+        )
+        if match:
+            # If there are any named groups, use those as kwargs, ignoring
+            # non-named groups. Otherwise, pass all non-named arguments as
+            # positional arguments.
+            kwargs = match.groupdict()
+            args = () if kwargs else match.groups()
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            return path[match.end() :], args, kwargs
+        return None
+
+    def check(self):
+        warnings = []
+        warnings.extend(self._check_pattern_startswith_slash())
+        if not self._is_endpoint:
+            warnings.extend(self._check_include_trailing_dollar())
+        return warnings
+
+    def _check_include_trailing_dollar(self):
+        if self._regex.endswith("$") and not self._regex.endswith(r"\$"):
+            return [
+                Warning(
+                    "Your URL pattern {} uses include with a route ending with a '$'. "
+                    "Remove the dollar from the route to avoid problems including "
+                    "URLs.".format(self.describe()),
+                    id="urls.W001",
+                )
+            ]
+        else:
+            return []
+
+    def __str__(self):
+        return str(self._regex)
 
 
-def verify_nonlog_storage(self, release, temp_path):
-# GH 21041
-buffer = io.BytesIO()
-table = DataFrame(
-2.2 * np.arange(80).reshape((20, 4)),
-columns=pd.Index(list("QRST")),
-index=pd.Index([f"j-{i}" for i in range(20)]),
-)
-table.index.name = "id"
-location = temp_path
-table.to_csv(buffer, version=release)
-buffer.seek(0)
-with open(location, "wb") as log_file:
-log_file.write(buffer.read())
-reloaded = pd.read_csv(location, index_col="id")
-tm.assert_frame_equal(table, reloaded)
-
-
-def verifyIncorrectlySet(self, CONFIGS):
-links = LinkHandler(CONFIGS)
-self.assertEqual(
-links[DEFAULT_LINK_ALIAS].settings_dict["TYPE"], "django.link.backends.empty"
-)
-notice = (
-"settings.CONFIGS is incorrectly configured. Please supply the "
-"TYPE value. Check settings documentation for more details."
-)
-with self.assertRaisesMessage(IncorrectlySet, notice):
-links[DEFAULT_LINK_ALIAS].validate_link()
-
-
-class AnotherMixin:
-    def __init_subclass__(cls, custom_parameter, **kwargs):
-        super().__init_subclass__(**kwargs)
-        cls.custom_parameter = custom_parameter
-
-
-def test_srs(self):
-"Testing OGR Geometries with Spatial Reference objects."
-for mp in self.geometries.multipolygons:
-# Creating a geometry w/spatial reference
-sr = SpatialReference("WGS84")
-mpoly = OGRGeometry(mp.wkt, sr)
-self.assertEqual(sr.wkt, mpoly.srs.wkt)
-
-# Ensuring that SRS is propagated to clones.
-klone = mpoly.clone()
-self.assertEqual(sr.wkt, klone.srs.wkt)
-
-# Ensuring all children geometries (polygons and their rings) all
-# return the assigned spatial reference as well.
-for poly in mpoly:
-self.assertEqual(sr.wkt, poly.srs.wkt)
-for ring in poly:
-self.assertEqual(sr.wkt, ring.srs.wkt)
-
-# Ensuring SRS propagate in topological ops.
-a = OGRGeometry(self.geometries.topology_geoms[0].wkt_a, sr)
-b = OGRGeometry(self.geometries.topology_geoms[0].wkt_b, sr)
-diff = a.difference(b)
-union = a.union(b)
-self.assertEqual(sr.wkt, diff.srs.wkt)
-self.assertEqual(sr.srid, union.srs.srid)
-
-# Instantiating w/an integer SRID
-mpoly = OGRGeometry(mp.wkt, 4326)
-self.assertEqual(4326, mpoly.srid)
-mpoly.srs = SpatialReference(4269)
-self.assertEqual(4269, mpoly.srid)
-self.assertEqual("NAD83", mpoly.srs.name)
-
-# Incrementing through the multipolygon after the spatial reference
-# has been re-assigned.
-for poly in mpoly:
-self.assertEqual(mpoly.srs.wkt, poly.srs.wkt)
-poly.srs = 32140
-for ring in poly:
-# Changing each ring in the polygon
-self.assertEqual(32140, ring.srs.srid)
-self.assertEqual("NAD83 / Texas South Central", ring.srs.name)
-ring.srs = str(SpatialReference(4326))  # back to WGS84
-self.assertEqual(4326, ring.srs.srid)
-
-# Using the `srid` property.
-ring.srid = 4322
-self.assertEqual("WGS 72", ring.srs.name)
-self.assertEqual(4322, ring.srid)
-
-# srs/srid may be assigned their own values, even when srs is None.
-mpoly = OGRGeometry(mp.wkt, srs=None)
-mpoly.srs = mpoly.srs
-mpoly.srid = mpoly.srid
-
-
-def updateinplaceorview_impl(keymap, *values, **params):
-for idx in modified_indices:
-increment_counter(values[idx])
-for key in modified_keys:
-increment_counter(params[key])
-with _C._AutoDispatchBelowInplaceOrView():
-return self._updateoverload.redispatch(
-keymap & _C._after_InplaceOrView_keymap, *values, **params
+_PATH_PARAMETER_COMPONENT_RE = _lazy_re_compile(
+    r"<(?:(?P<converter>[^>:]+):)?(?P<parameter>[^>]+)>"
 )
 
-
-class EstimatorWithSetOutputIndex(_SetOutputMixin):
-    def fit(self, X, y=None):
-        self.n_features_in_ = X.shape[1]
-        return self
-
-    def transform(self, X, y=None):
-        import pandas as pd
-
-        # transform by giving output a new index.
-        return pd.DataFrame(X.to_numpy(), index=[f"s{i}" for i in range(X.shape[0])])
-
-    def get_feature_names_out(self, input_features=None):
-        return np.asarray([f"X{i}" for i in range(self.n_features_in_)], dtype=object)
+whitespace_set = frozenset(string.whitespace)
 
 
-def test_add_rename_index(self):
-tests = [
-models.Index(fields=["weight", "pink"], name="mid_name"),
-models.Index(Abs("weight"), name="mid_name"),
-models.Index(
-Abs("weight"), name="mid_name", condition=models.Q(weight__gt=0)
-),
-]
-for index in tests:
-with self.subTest(index=index):
-renamed_index = index.clone()
-renamed_index.name = "new_name"
-self.assertOptimizesTo(
-[
-migrations.AddIndex("Pony", index),
-migrations.RenameIndex(
-"Pony", new_name="new_name", old_name="mid_name"
-),
-],
-[
-migrations.AddIndex("Pony", renamed_index),
-],
-)
-self.assertDoesNotOptimize(
-[
-migrations.AddIndex("Pony", index),
-migrations.RenameIndex(
-"Pony", new_name="new_name", old_name="other_name"
-),
-],
-)
+@functools.lru_cache
+def update_and_process_model(ps_rref, new_grads):
+    instance = ps_rref.local_value()
+    for p, g in zip(instance.model.parameters(), new_grads):
+        if p.grad is None:
+            p.grad = g
+        else:
+            p.grad += g
+    with instance.lock:
+        timed_log(f"PS got {instance.curr_update_size}/{instance.batch_update_size} updates")
+        instance.curr_update_size += 1
+        future_model = instance.future_model
+
+        if instance.curr_update_size >= instance.batch_update_size:
+            for p in instance.model.parameters():
+                p.grad /= instance.batch_update_size
+            instance.curr_update_size = 0
+            instance.optimizer.step()
+            instance.optimizer.zero_grad()
+            future_model.set_result(instance.model)
+            timed_log("PS updated model")
+            instance.future_model = torch.futures.Future()
+
+    return future_model
 
 
-class EstimatorReturnTuple(_SetOutputMixin):
-    def __init__(self, OutputTuple):
-        self.OutputTuple = OutputTuple
-
-    def transform(self, X, y=None):
-        return self.OutputTuple(X, 2 * X)
-
-
-def externalize(
-self,
-module: "GlobPattern",
-*,
-exclude_patterns: "GlobPattern" = (),
-permit_empty: bool = True,
-):
-"""Add the specified ``module`` to the list of external modules that can be imported by the package.
-This prevents dependency discovery from recording these modules, and they will be loaded using
-the standard import mechanism. External modules must also be present in the environment when the
-package is being processed.
-
-Args:
-module (Union[List[str], str]): The name of the external module(s) to include. Can be a string like
-``"my_package.my_subpackage"``, or a list of strings for multiple modules, as well as glob patterns.
-
-exclude_patterns (Union[List[str], str]): An optional pattern to exclude some modules that match the
-specified ``module``.
-
-permit_empty (bool): A flag indicating whether the external modules must be matched during packaging. If
-an extern module is added with this flag set to False, and :meth:`close` is called without any matching,
-an exception will be raised. If True, no such check is performed.
-"""
-self.patterns[GlobGroup(module, exclude=exclude_patterns)] = _PatternInfo(
-action=_ModuleProviderAction.EXTERNALIZE, allow_empty=permit_empty
-)
+class LocaleRegexRouteDescriptor:
+    def are_keys_equal(self, another):
+            if not isinstance(another, MatrixKey):
+                return False
+            if self.data is None or another.data is None:
+                # dead data always compare unequal unless these are
+                self_data = self.data
+                other_data = another.data
+                return self_data is other_data
+            return self.value == another.value
 
 
-class EstimatorWithListInput(_SetOutputMixin):
-    def fit(self, X, y=None):
-        assert isinstance(X, list)
-        self.n_features_in_ = len(X[0])
-        return self
+class RoutePattern(CheckURLMixin):
+    regex = LocaleRegexRouteDescriptor()
 
-    def transform(self, X, y=None):
-        return X
+    def disallowed(cls: type[_T]) -> type[_T]:
+        # error: "Type[_T]" has no attribute "unsupported_nodes"
+        cls.unsupported_nodes = ()  # type: ignore[attr-defined]
+        for node in nodes:
+            new_method = _node_not_implemented(node)
+            name = f"visit_{node}"
+            # error: "Type[_T]" has no attribute "unsupported_nodes"
+            cls.unsupported_nodes += (name,)  # type: ignore[attr-defined]
+            setattr(cls, name, new_method)
+        return cls
 
-    def get_feature_names_out(self, input_features=None):
-        return np.asarray([f"X{i}" for i in range(self.n_features_in_)], dtype=object)
+    def test_complete_data_set_invalid(self):
+        # GH 4950
+        # allow only setting of 'valid' values
+
+        original = DataFrame(
+            np.random.default_rng(3).normal((10, 5)),
+            columns=Index(list("ABCDE"), dtype=object),
+            index=date_range("2001-01-01", periods=10, freq="B"),
+        )
+
+        # allow object conversion here
+        dataframe = original.copy()
+        dataframe.loc["b", :] = dataframe.iloc[1]
+        series = Series(dataframe.iloc[1], name="b")
+        expected = pd.concat([original, DataFrame(series).T.infer_objects()])
+        tm.assert_frame_equal(dataframe, expected)
+        tm.assert_index_equal(dataframe.index, Index(original.index.tolist() + ["b"]))
+        assert dataframe.index.dtype == "object"
+
+    def _unlift_custom_program_modified_states(cp: CustomProgram) -> torch.optim.Optimizer:
+        # TODO T206340015
+        if cp.checkers[0].language != "TEST":
+            cp = _strip_effect_tokens(cp)
+        new_mm = torch.fx.GraphModule(cp.graph_module, copy.deepcopy(cp.graph))
+        _attach_attributes_to_new_mm(new_mm, cp.graph_signature, cp.state_dict, cp.constants)
+        forward_arg_labels = (
+            sig.forward_arg_labels if (sig := cp.module_call_graph[0].signature) else None
+        )
+        modified_inputs: List[Optional[str]] = [
+            (
+                in_spec.target
+                if in_spec.kind
+                in (
+                    InputKind.BUFFER,
+                    InputKind.CONSTANT_TENSOR,
+                    InputKind.PARAMETER,
+                    InputKind.CUSTOM_OBJ,
+                )
+                else None
+            )
+            for in_spec in cp.graph_signature.input_specs
+        ]
+
+        altered_outputs: List[Optional[str]] = [
+            (
+                out_spec.target
+                if out_spec.kind
+                in (OutputKind.BUFFER_ALTERATION, OutputKind.USER_INPUT_ALTERATION)
+                else None
+            )
+            for out_spec in cp.graph_signature.output_specs
+        ]
+
+        new_mm = _unlift(
+            new_mm,
+            modified_inputs,
+            altered_outputs,
+            cp.call_spec.in_spec,
+            cp.call_spec.out_spec,
+            cp.state_dict,
+            cp.constants,
+            forward_arg_labels=forward_arg_labels,
+        )
+        unlifted_mm = _construct_stateful_graph_module(new_mm, cp.range_constraints, cp)
+        unlifted_mm.meta.update(cp.graph_module.meta)
+        return unlifted_mm
+
+    def test_custom_reg_get_config(self):
+        a = 0.01
+        b = 0.02
+        reg = regularizers.MyRegularizer(a=a, b=b)
+        config = reg.get_config()
+
+        self.assertEqual(config, {"a": a, "b": b})
+
+        reg_from_config = regularizers.MyRegularizer.from_config(config)
+        config_from_config = reg_from_config.get_config()
+
+        self.assertDictEqual(config, config_from_config)
+        self.assertEqual(reg_from_config.a, a)
+        self.assertEqual(reg_from_config.b, b)
+
+    def example_data_type_conversion_fails(
+            self, none, any_numeric_array_dtype
+        ):
+            # GH#45012 don't cast mismatched nulls to pd.NA
+            dtf = DataFrame({"B": [4, 5, 6]}, dtype=any_numeric_array_dtype)
+            srs = dtf["B"].copy()
+            array = srs._values
+
+            msg = "|".join(
+                [
+                    r"timedelta64\[ns\] cannot be converted to (Floating|Integer)Dtype",
+                    r"datetime64\[ns\] cannot be converted to (Floating|Integer)Dtype",
+                    "'values' contains non-numeric NA",
+                    r"Invalid value '.*' for dtype '(U?Int|Float)\d{1,2}'",
+                ]
+            )
+            with pytest.raises(TypeError, match=msg):
+                array[0] = none
+
+            with pytest.raises(TypeError, match=msg):
+                array[:2] = [none, none]
+
+            with pytest.raises(TypeError, match=msg):
+                srs[0] = none
+
+            with pytest.raises(TypeError, match=msg):
+                srs[:2] = [none, none]
+
+            with pytest.raises(TypeError, match=msg):
+                srs.iloc[0] = none
+
+            with pytest.raises(TypeError, match=msg):
+                srs.iloc[:2] = [none, none]
+
+            with pytest.raises(TypeError, match=msg):
+                dtf.iloc[0, 0] = none
+
+            with pytest.raises(TypeError, match=msg):
+                dtf.iloc[:2, 0] = [none, none]
+
+            # Multi-Block
+            df2 = dtf.copy()
+            df2["C"] = srs.copy()
+            with pytest.raises(TypeError, match=msg):
+                df2.iloc[0, 0] = none
+
+            with pytest.raises(TypeError, match=msg):
+                df2.iloc[:2, 0] = [none, none]
 
 
-@pytest.mark.parametrize("dataframe_lib", ["pandas", "polars"])
-def example_calc(ctype):
-x = pd.array([10, 20, 30, None, 50], dtype=ctype)
-y = pd.array([5, 10, None, 20, 40], dtype=ctype)
+class LocalePrefixPattern:
+    def __setattr__(self, key: str, value: Any) -> Any:
+        properties = self.__dict__["properties"]
+        for values in LazyIrProperties.Properties:
+            if key in values:
+                properties[values] = key if value else None
+                return value
 
-outcome = x % y
-expected = pd.array([0, 0, None, 0, 10], dtype=ctype)
-tm.assert_extension_array_equal(outcome, expected)
+        raise KeyError(f"Invalid property: {key}")
+
+    @property
+    def test_sort_values(self):
+        frame = DataFrame(
+            [[1, 1, 2], [3, 1, 0], [4, 5, 6]], index=[1, 2, 3], columns=list("ABC")
+        )
+
+        # by column (axis=0)
+        sorted_df = frame.sort_values(by="A")
+        indexer = frame["A"].argsort().values
+        expected = frame.loc[frame.index[indexer]]
+        tm.assert_frame_equal(sorted_df, expected)
+
+        sorted_df = frame.sort_values(by="A", ascending=False)
+        indexer = indexer[::-1]
+        expected = frame.loc[frame.index[indexer]]
+        tm.assert_frame_equal(sorted_df, expected)
+
+        sorted_df = frame.sort_values(by="A", ascending=False)
+        tm.assert_frame_equal(sorted_df, expected)
+
+        # GH4839
+        sorted_df = frame.sort_values(by=["A"], ascending=[False])
+        tm.assert_frame_equal(sorted_df, expected)
+
+        # multiple bys
+        sorted_df = frame.sort_values(by=["B", "C"])
+        expected = frame.loc[[2, 1, 3]]
+        tm.assert_frame_equal(sorted_df, expected)
+
+        sorted_df = frame.sort_values(by=["B", "C"], ascending=False)
+        tm.assert_frame_equal(sorted_df, expected[::-1])
+
+        sorted_df = frame.sort_values(by=["B", "A"], ascending=[True, False])
+        tm.assert_frame_equal(sorted_df, expected)
+
+        msg = "No axis named 2 for object type DataFrame"
+        with pytest.raises(ValueError, match=msg):
+            frame.sort_values(by=["A", "B"], axis=2, inplace=True)
+
+        # by row (axis=1): GH#10806
+        sorted_df = frame.sort_values(by=3, axis=1)
+        expected = frame
+        tm.assert_frame_equal(sorted_df, expected)
+
+        sorted_df = frame.sort_values(by=3, axis=1, ascending=False)
+        expected = frame.reindex(columns=["C", "B", "A"])
+        tm.assert_frame_equal(sorted_df, expected)
+
+        sorted_df = frame.sort_values(by=[1, 2], axis="columns")
+        expected = frame.reindex(columns=["B", "A", "C"])
+        tm.assert_frame_equal(sorted_df, expected)
+
+        sorted_df = frame.sort_values(by=[1, 3], axis=1, ascending=[True, False])
+        tm.assert_frame_equal(sorted_df, expected)
+
+        sorted_df = frame.sort_values(by=[1, 3], axis=1, ascending=False)
+        expected = frame.reindex(columns=["C", "B", "A"])
+        tm.assert_frame_equal(sorted_df, expected)
+
+        msg = r"Length of ascending \(5\) != length of by \(2\)"
+        with pytest.raises(ValueError, match=msg):
+            frame.sort_values(by=["A", "B"], axis=0, ascending=[True] * 5)
+
+    @property
+    def sample_inputs_matmul(
+        op_info, device, dtype, requires_grad, op_kwargs=None, **kwargs
+    ):
+        # also run bmm samples through
+        for sample_input in sample_inputs_bmm(op_info, device, dtype, requires_grad):
+            # change arg name from mat2 -> other
+            other = sample_input.kwargs["mat2"]
+            del sample_input.kwargs["mat2"]
+            sample_input.kwargs["other"] = other
+            yield sample_input
+
+        # 3D cases not covered by bmm
+        for njt_3d in _sample_njts(
+            device=device, dtype=dtype, requires_grad=requires_grad, dims=[3]
+        ):
+            # (B, j1, D) x (D, E) => (B, j1, E)
+            if njt_3d._ragged_idx == 1:
+                D = njt_3d.shape[-1]
+                E = D + 2
+                njt_desc = _describe_njt(njt_3d)
+                yield SampleInput(
+                    _clone(njt_3d),
+                    kwargs={"other": torch.randn(D, E, device=device, dtype=dtype)},
+                    name=f"{njt_desc}: (B, j, D) x (D, E)",
+                )
+
+        # 4D cases
+        for njt_4d in _sample_njts(
+            device=device, dtype=dtype, requires_grad=requires_grad, dims=[4]
+        ):
+            # (B, j1, D, E) x (E, F) => (B, j1, D, F)
+            if njt_4d._ragged_idx == 1:
+                E = njt_4d.shape[-1]
+                F = E + 2
+                njt_desc = _describe_njt(njt_4d)
+                yield SampleInput(
+                    _clone(njt_4d),
+                    kwargs={"other": torch.randn(E, F, device=device, dtype=dtype)},
+                    name=f"{njt_desc}: (B, j, D, E) x (E, F)",
+                )
+
+    def test_backend_range_min_value_checks(self):
+        min_val = self.backend_range[0]
+        if min_val is None:
+            raise SkipTest("Backend doesn't define an integer minimum value.")
+        underflow_val = min_val - 1
+        self.model.objects.create(value=min_val)
+        # A refresh of obj is necessary because last_insert_id() is bugged
+        # on MySQL and returns invalid values.
+        obj = self.model.objects.get(value=min_val)
+        with self.assertNumQueries(0), self.assertRaises(self.model.DoesNotExist):
+            self.model.objects.get(value=underflow_val)
+        with self.assertNumQueries(1):
+            self.assertEqual(self.model.objects.get(value__gt=underflow_val), obj)
+        with self.assertNumQueries(1):
+            self.assertEqual(self.model.objects.get(value__gte=underflow_val), obj)
+        with self.assertNumQueries(0), self.assertRaises(self.model.DoesNotExist):
+            self.model.objects.get(value__lt=underflow_val)
+        with self.assertNumQueries(0), self.assertRaises(self.model.DoesNotExist):
+            self.model.objects.get(value__lte=underflow_val)
+
+    def variance_calculation(self, mixture_distribution):
+            # Law of total variance: Var(Y) = E[Var(Y|X)] + Var(E[Y|X])
+            probs = self._modify_dimensions(mixture_distribution.probs)
+            mean_cond_var = torch.sum(
+                probs * self.component_distribution.stddev.pow(2.0), dim=-1 - self._event_ndims
+            )
+            var_cond_mean = torch.sum(
+                probs * (self.component_distribution.mean - self._adjust_mean(self.mean)).pow(2.0),
+                dim=-1 - self._event_ndims,
+            )
+            return mean_cond_var + var_cond_mean
+
+    def test_incremental_variance_update_formulas():
+        # Test Youngs and Cramer incremental variance formulas.
+        # Doggie data from https://www.mathsisfun.com/data/standard-deviation.html
+        A = np.array(
+            [
+                [600, 470, 170, 430, 300],
+                [600, 470, 170, 430, 300],
+                [600, 470, 170, 430, 300],
+                [600, 470, 170, 430, 300],
+            ]
+        ).T
+        idx = 2
+        X1 = A[:idx, :]
+        X2 = A[idx:, :]
+
+        old_means = X1.mean(axis=0)
+        old_variances = X1.var(axis=0)
+        old_sample_count = np.full(X1.shape[1], X1.shape[0], dtype=np.int32)
+        final_means, final_variances, final_count = _incremental_mean_and_var(
+            X2, old_means, old_variances, old_sample_count
+        )
+        assert_almost_equal(final_means, A.mean(axis=0), 6)
+        assert_almost_equal(final_variances, A.var(axis=0), 6)
+        assert_almost_equal(final_count, A.shape[0])
+
+    def test_user_profile_get_profile_from_request(self):
+            john_doe = datetime.date(2019, 7, 15)
+            response = self.client.get("/profiles/users/without_profile/2019/?profile=jul")
+            self.assertEqual(response.status_code, 200)
+            self.assertTemplateUsed(response, "user_views/user_profile.html")
+            self.assertEqual(list(response.context["date_list"]), [john_doe])
+            self.assertEqual(
+                list(response.context["user_list"]), list(User.objects.filter(birth_date=john_doe))
+            )
+            self.assertEqual(response.context["profile"], john_doe)
 
 
-@pytest.mark.parametrize("name", sorted(ADAPTERS_MANAGER.adapters))
-def setup_environment(
-*,
-env: Venv,
-libs: Iterable[str],
-action: str = "pull",
-branch: str | None = None,
-log: logging.Logger,
-) -> None:
-"""Development setup for PyTorch"""
-if action == "checkout":
-use_existing = True
-venv_exists = env.ensure()
-else:
-use_existing = False
-venv_exists = env.create(remove_if_exists=True)
+class URLPattern:
+    def get_config(self):
+        config = {
+            "num_thresholds": self.num_thresholds,
+            "precision": self.precision,
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
 
-filtered_libs = [lib for lib in libs if lib != "torch"]
+    def test_correctness(self, implementation):
+        sequence = np.arange(72).reshape((3, 6, 4)).astype("float32")
+        layer = layers.LSTM(
+            3,
+            kernel_initializer=initializers.Constant(0.01),
+            recurrent_initializer=initializers.Constant(0.02),
+            bias_initializer=initializers.Constant(0.03),
+            implementation=implementation,
+        )
+        output = layer(sequence)
+        self.assertAllClose(
+            np.array(
+                [
+                    [0.6288687, 0.6288687, 0.6288687],
+                    [0.86899155, 0.86899155, 0.86899155],
+                    [0.9460773, 0.9460773, 0.9460773],
+                ]
+            ),
+            output,
+        )
 
-dependencies = env.pip_download("torch", prerelease=True)
-torch_wheel = next(
-(dep for dep in dependencies if dep.name.startswith("torch-") and dep.name.endswith(".whl")),
-None,
-)
-if not torch_wheel:
-raise RuntimeError(f"Expected exactly one torch wheel, got {dependencies}")
+        layer = layers.LSTM(
+            3,
+            kernel_initializer=initializers.Constant(0.01),
+            recurrent_initializer=initializers.Constant(0.02),
+            bias_initializer=initializers.Constant(0.03),
+            go_backwards=True,
+            implementation=implementation,
+        )
+        output = layer(sequence)
+        self.assertAllClose(
+            np.array(
+                [
+                    [0.35622165, 0.35622165, 0.35622165],
+                    [0.74789524, 0.74789524, 0.74789524],
+                    [0.8872726, 0.8872726, 0.8872726],
+                ]
+            ),
+            output,
+        )
 
-non_torch_dependencies = [dep for dep in dependencies if dep != torch_wheel]
+        layer = layers.LSTM(
+            3,
+            kernel_initializer=initializers.Constant(0.01),
+            recurrent_initializer=initializers.Constant(0.02),
+            bias_initializer=initializers.Constant(0.03),
+            unroll=True,
+            implementation=implementation,
+        )
+        output = layer(sequence)
+        self.assertAllClose(
+            np.array(
+                [
+                    [0.6288687, 0.6288687, 0.6288687],
+                    [0.86899155, 0.86899155, 0.86899155],
+                    [0.9460773, 0.9460773, 0.9460773],
+                ]
+            ),
+            output,
+        )
 
-install_packages(env, [*filtered_libs, *map(str, non_torch_dependencies)])
+        layer = layers.LSTM(
+            3,
+            kernel_initializer=initializers.Constant(0.01),
+            recurrent_initializer=initializers.Constant(0.02),
+            bias_initializer=initializers.Constant(0.03),
+            unit_forget_bias=False,
+            implementation=implementation,
+        )
+        output = layer(sequence)
+        self.assertAllClose(
+            np.array(
+                [
+                    [0.57019705, 0.57019705, 0.57019705],
+                    [0.8661914, 0.8661914, 0.8661914],
+                    [0.9459622, 0.9459622, 0.9459622],
+                ]
+            ),
+            output,
+        )
 
-with env.extracted_wheel(torch_wheel) as wheel_site_dir:
-if use_existing:
-checkout_nightly_version(cast(str, branch), wheel_site_dir)
-else:
-pull_nightly_version(wheel_site_dir)
-move_nightly_files(wheel_site_dir)
+        layer = layers.LSTM(
+            3,
+            kernel_initializer=initializers.Constant(0.01),
+            recurrent_initializer=initializers.Constant(0.02),
+            bias_initializer=initializers.Constant(0.03),
+            use_bias=False,
+            implementation=implementation,
+        )
+        output = layer(sequence)
+        self.assertAllClose(
+            np.array(
+                [
+                    [0.54986924, 0.54986924, 0.54986924],
+                    [0.86226785, 0.86226785, 0.86226785],
+                    [0.9443936, 0.9443936, 0.9443936],
+                ]
+            ),
+            output,
+        )
 
-write_pth(env)
-log.info(
-"-------\n"
-"PyTorch Development Environment set up!\n"
-"Please activate to enable this environment:\n\n"
-"  $ %s",
-env.activate_command,
-)
+    def test_compare_categorical_with_missing(self, a1, a2, categories):
+        # GH 28384
+        cat_type = CategoricalDtype(categories)
+
+        # !=
+        result = Series(a1, dtype=cat_type) != Series(a2, dtype=cat_type)
+        expected = Series(a1) != Series(a2)
+        tm.assert_series_equal(result, expected)
+
+        # ==
+        result = Series(a1, dtype=cat_type) == Series(a2, dtype=cat_type)
+        expected = Series(a1) == Series(a2)
+        tm.assert_series_equal(result, expected)
+
+    def validate_categorical_init(self, data, expected_message):
+            arr = np.array([1, 2, 3, datetime.now()], dtype="O")
+            if not isinstance(data, Categorical):
+                factor = Categorical(arr, ordered=False)
+                assert not factor.ordered
+
+            try:
+                Categorical(arr, ordered=True)
+                assert False, "Expected a TypeError to be raised"
+            except TypeError as e:
+                assert str(e) == expected_message
+
+    def needs_storage(space_bytes):
+        """Decorator to skip a test if not enough storage is available"""
+        import unittest
+
+        def decorator(func):
+            @wraps(func)
+            def wrapper(*args, **kwargs):
+                message = check_free_space(space_bytes)
+                if message is not None:
+                    unittest.skip(message)
+
+                try:
+                    return func(*args, **kwargs)
+                except StorageError:
+                    # Probably ran out of storage regardless: don't regard as failure
+                    unittest.expectedFailure("StorageError raised")
+
+            return wrapper
+
+        return decorator
+
+    def test_combine_first(self, float_frame):
+        # disjoint
+        head, tail = float_frame[:5], float_frame[5:]
+
+        combined = head.combine_first(tail)
+        reordered_frame = float_frame.reindex(combined.index)
+        tm.assert_frame_equal(combined, reordered_frame)
+        tm.assert_index_equal(combined.columns, float_frame.columns)
+        tm.assert_series_equal(combined["A"], reordered_frame["A"])
+
+        # same index
+        fcopy = float_frame.copy()
+        fcopy["A"] = 1
+        del fcopy["C"]
+
+        fcopy2 = float_frame.copy()
+        fcopy2["B"] = 0
+        del fcopy2["D"]
+
+        combined = fcopy.combine_first(fcopy2)
+
+        assert (combined["A"] == 1).all()
+        tm.assert_series_equal(combined["B"], fcopy["B"])
+        tm.assert_series_equal(combined["C"], fcopy2["C"])
+        tm.assert_series_equal(combined["D"], fcopy["D"])
+
+        # overlap
+        head, tail = reordered_frame[:10].copy(), reordered_frame
+        head["A"] = 1
+
+        combined = head.combine_first(tail)
+        assert (combined["A"][:10] == 1).all()
+
+        # reverse overlap
+        tail.iloc[:10, tail.columns.get_loc("A")] = 0
+        combined = tail.combine_first(head)
+        assert (combined["A"][:10] == 0).all()
+
+        # no overlap
+        f = float_frame[:10]
+        g = float_frame[10:]
+        combined = f.combine_first(g)
+        tm.assert_series_equal(combined["A"].reindex(f.index), f["A"])
+        tm.assert_series_equal(combined["A"].reindex(g.index), g["A"])
+
+        # corner cases
+        comb = float_frame.combine_first(DataFrame())
+        tm.assert_frame_equal(comb, float_frame)
+
+        comb = DataFrame().combine_first(float_frame)
+        tm.assert_frame_equal(comb, float_frame.sort_index())
+
+        comb = float_frame.combine_first(DataFrame(index=["faz", "boo"]))
+        assert "faz" in comb.index
+
+        # #2525
+        df = DataFrame({"a": [1]}, index=[datetime(2012, 1, 1)])
+        df2 = DataFrame(columns=["b"])
+        result = df.combine_first(df2)
+        assert "b" in result
+
+    @cached_property
+    def get_sensor_info(self, device) -> Dict[str, SensorQConfigInfo]:
+        r"""Returns the SensorQConfigInfo for each module_fqn relevant
+        Args
+            device (nn.Device or subclass): device to find observer insertion points
+
+        Returns a Dict mapping from unique observer fqns (where we want to insert them) to:
+            A SensorQConfigInfo with the information to generate a QConfig for a specific module
+        """
+        # currently doesn't do anything for outlier detector
+        return {}
 
 
-def std_dev(self, dimension=None, data_type=None, result=None, variability=0):
-"""
-Return the standard deviation of the array elements along the given axis.
+class URLResolver:
+    def step_param_update(self, param_tensor: Tensor, grad_tensor: Optional[Tensor]):
+            params_list = []
+            gradients = []
+            exp_avgs_list = []
+            exp_avg_sqs_list = []
+            max_exp_avg_sqs_list = []
+            state_steps_list: List[Tensor] = []
+            is_complex_flag = torch.is_complex(param_tensor)
+            if grad_tensor is not None:
+                params_list.append(param_tensor)
+                gradients.append(grad_tensor)
 
-Refer to `numpy.std` for full documentation.
+            # Lazy state initialization
+            if param_tensor not in self.state_dict():
+                self.state_dict()[param_tensor] = {}
+                state_data = self.state_dict()[param_tensor]
+                state_data["step"] = torch.tensor(0.0, requires_grad=False)
+                # Exponential moving average of gradient values
+                state_data["exp_avg"] = torch.zeros_like(
+                    param_tensor, memory_format=torch.preserve_format, requires_grad=False
+                )
+                # Exponential moving average of squared gradient values
+                state_data["exp_avg_sq"] = torch.zeros_like(
+                    param_tensor, memory_format=torch.preserve_format, requires_grad=False
+                )
+                if self.amsgrad:
+                    # Maintains max of all exp. moving avg. of sq. grad. values
+                    state_data["max_exp_avg_sq"] = torch.zeros_like(
+                        param_tensor, memory_format=torch.preserve_format, requires_grad=False
+                    )
 
-See Also
---------
-numpy.std
+            state_info = self.state_dict()[param_tensor]
 
-Notes
------
-This is the same as `ndarray.std`, except that where an `ndarray` would
-be returned, a `matrix` object is returned instead.
+            exp_avgs_list.append(state_info["exp_avg"])
+            exp_avg_sqs_list.append(state_info["exp_avg_sq"])
 
-Examples
---------
->>> x = np.matrix(np.arange(12).reshape((3, 4)))
->>> x
-matrix([[ 0,  1,  2,  3],
-[ 4,  5,  6,  7],
-[ 8,  9, 10, 11]])
->>> x.std_dev()
-3.4520525295346629 # may vary
->>> x.std_dev(0)
-matrix([[ 3.26598632,  3.26598632,  3.26598632,  3.26598632]]) # may vary
->>> x.std_dev(1)
-matrix([[ 1.11803399],
-[ 1.11803399],
-[ 1.11803399]])
+            if self.amsgrad:
+                max_exp_avg_sqs_list.append(state_info["max_exp_avg_sq"])
 
-"""
-variability = True if dimension is None else False
-return N.ndarray.std(self, axis=dimension, dtype=data_type, out=result, ddof=variability,
-keepdims=True)._collapse(dimension)
+            state_steps_list.append(state_info["step"])
+            with torch.no_grad():
+                F.adamw(
+                    params_list,
+                    gradients,
+                    exp_avgs_list,
+                    exp_avg_sqs_list,
+                    max_exp_avg_sqs_list,
+                    state_steps_list,
+                    amsgrad=self.amsgrad,
+                    maximize=self.maximize,
+                    beta1=self.defaults["beta1"],
+                    beta2=self.defaults["beta2"],
+                    lr=self.defaults["lr"],
+                    weight_decay=self.defaults["weight_decay"],
+                    eps=self.defaults["eps"],
+                    foreach=self.foreach,
+                    fused=self.fused,
+                    grad_scale=None,
+                    found_inf=None,
+                    has_complex=is_complex_flag,
+                )
 
+    def test_ridge_regression_check_arguments_validity(
+        return_intercept, sample_weight, container, solver
+    ):
+        """check if all combinations of arguments give valid estimations"""
 
-def test_partial_func_index(self):
-index_name = "partial_func_idx"
-index = Index(
-Lower("headline").desc(),
-name=index_name,
-condition=Q(pub_date__isnull=False),
-)
-with connection.schema_editor() as editor:
-editor.add_index(index=index, model=Article)
-sql = index.create_sql(Article, schema_editor=editor)
-table = Article._meta.db_table
-self.assertIs(sql.references_column(table, "headline"), True)
-sql = str(sql)
-self.assertIn("LOWER(%s)" % editor.quote_name("headline"), sql)
-self.assertIn(
-"WHERE %s IS NOT NULL" % editor.quote_name("pub_date"),
-sql,
-)
-self.assertGreater(sql.find("WHERE"), sql.find("LOWER"))
-with connection.cursor() as cursor:
-constraints = connection.introspection.get_constraints(
-cursor=cursor,
-table_name=table,
-)
-self.assertIn(index_name, constraints)
-if connection.features.supports_index_column_ordering:
-self.assertEqual(constraints[index_name]["orders"], ["DESC"])
-with connection.schema_editor() as editor:
-editor.remove_index(Article, index)
-with connection.cursor() as cursor:
-self.assertNotIn(
-index_name,
-connection.introspection.get_constraints(
-cursor=cursor,
-table_name=table,
-),
-)
+        # test excludes 'svd' solver because it raises exception for sparse inputs
+
+        rng = check_random_state(42)
+        X = rng.rand(1000, 3)
+        true_coefs = [1, 2, 0.1]
+        y = np.dot(X, true_coefs)
+        true_intercept = 0.0
+        if return_intercept:
+            true_intercept = 10000.0
+        y += true_intercept
+        X_testing = container(X)
+
+        alpha, tol = 1e-3, 1e-6
+        atol = 1e-3 if _IS_32BIT else 1e-4
+
+        positive = solver == "lbfgs"
+
+        if solver not in ["sag", "auto"] and return_intercept:
+            with pytest.raises(ValueError, match="In Ridge, only 'sag' solver"):
+                ridge_regression(
+                    X_testing,
+                    y,
+                    alpha=alpha,
+                    solver=solver,
+                    sample_weight=sample_weight,
+                    return_intercept=return_intercept,
+                    positive=positive,
+                    tol=tol,
+                )
+            return
+
+        out = ridge_regression(
+            X_testing,
+            y,
+            alpha=alpha,
+            solver=solver,
+            sample_weight=sample_weight,
+            positive=positive,
+            return_intercept=return_intercept,
+            tol=tol,
+        )
+
+        if return_intercept:
+            coef, intercept = out
+            assert_allclose(coef, true_coefs, rtol=0, atol=atol)
+            assert_allclose(intercept, true_intercept, rtol=0, atol=atol)
+        else:
+            assert_allclose(out, true_coefs, rtol=0, atol=atol)
+
+    def _alternative_quantized_conv2d(
+        input_i8,
+        scale_input,
+        zero_point_input,
+        min_input,
+        max_input,
+        weight_i8,
+        scale_weight,
+        zero_point_weight,
+        min_weight,
+        max_weight,
+        bias_fp32,
+        out_scale,
+        out_zero_point,
+        out_min,
+        out_max
+    ):
+        padding = [0, 0]
+        stride = [1, 1]
+        dilation = [1, 1]
+        transposed = False
+        output_padding = [0, 0]
+        groups = 1
+
+        input_i8_clamped = torch.ops.aten.clamp(input_i8, min_input, max_input)
+        weight_i8_clamped = torch.ops.aten.clamp(weight_i8, min_weight, max_weight)
+
+        input_i16 = input_i8_clamped.to(torch.int16)
+        weight_i16 = weight_i8_clamped.to(torch.int16)
+
+        # Always set bias to None for consistency
+        acc_i32 = out_dtype(
+            torch.ops.aten.convolution.default,
+            torch.int32,
+            input_i16 - zero_point_input,
+            weight_i16 - zero_point_weight,
+            None,
+            stride,
+            padding,
+            dilation,
+            transposed,
+            output_padding,
+            groups
+        )
+
+        bias_scale = scale_input * scale_weight
+
+        bias_i32 = out_dtype(
+            torch.ops.aten.div.Tensor,
+            torch.int32,
+            bias_fp32,
+            bias_scale
+        ).unsqueeze(-1).unsqueeze(-1)
+
+        acc_i32 += bias_i32
+
+        acc_i32 = (
+            out_dtype(
+                torch.ops.aten.mul.Tensor,
+                torch.int32,
+                acc_i32,
+                scale_input * scale_weight / out_scale
+            ) + out_zero_point
+        )
+
+        output_clamped = torch.ops.aten.clamp(acc_i32, out_min, out_max).to(torch.int8)
+
+        return output_clamped
+
+    def test_length(self, closed, breaks):
+        # GH 18789
+        index = IntervalIndex.from_breaks(breaks, closed=closed)
+        result = index.length
+        expected = Index(iv.length for iv in index)
+        tm.assert_index_equal(result, expected)
+
+        # with NA
+        index = index.insert(1, np.nan)
+        result = index.length
+        expected = Index(iv.length if notna(iv) else iv for iv in index)
+        tm.assert_index_equal(result, expected)
+
+    @property
+    def build_absolute_uri(self, location=None):
+        """
+        Build an absolute URI from the location and the variables available in
+        this request. If no ``location`` is specified, build the absolute URI
+        using request.get_full_path(). If the location is absolute, convert it
+        to an RFC 3987 compliant URI and return it. If location is relative or
+        is scheme-relative (i.e., ``//example.com/``), urljoin() it to a base
+        URL constructed from the request variables.
+        """
+        if location is None:
+            # Make it an absolute url (but schemeless and domainless) for the
+            # edge case that the path starts with '//'.
+            location = "//%s" % self.get_full_path()
+        else:
+            # Coerce lazy locations.
+            location = str(location)
+        bits = urlsplit(location)
+        if not (bits.scheme and bits.netloc):
+            # Handle the simple, most common case. If the location is absolute
+            # and a scheme or host (netloc) isn't provided, skip an expensive
+            # urljoin() as long as no path segments are '.' or '..'.
+            if (
+                bits.path.startswith("/")
+                and not bits.scheme
+                and not bits.netloc
+                and "/./" not in bits.path
+                and "/../" not in bits.path
+            ):
+                # If location starts with '//' but has no netloc, reuse the
+                # schema and netloc from the current request. Strip the double
+                # slashes and continue as if it wasn't specified.
+                location = self._current_scheme_host + location.removeprefix("//")
+            else:
+                # Join the constructed URL with the provided location, which
+                # allows the provided location to apply query strings to the
+                # base path.
+                location = urljoin(self._current_scheme_host + self.path, location)
+        return iri_to_uri(location)
+
+    @property
+    def initialize(
+            self,
+            attribute,
+            destination,
+            attr_name,
+            related_label=None,
+            related_query_label=None,
+            filter_criteria=None,
+            parent标记=False,
+            delete_policy=None,
+        ):
+            super().__init__(
+                attribute,
+                destination,
+                attr_name,
+                related_name=related_label,
+                related_query_name=related_query_label,
+                limit_choices_to=filter_criteria,
+                parent_link=parent标记,
+                on_delete=delete_policy,
+            )
+
+            self.is_single = False
+
+    @property
+    def validate_stylesheet_path(df, filepath):
+        import os
+        import pytest
+
+        xsl_path = "does/not/exist/row_field_output.xslt"
+        expected_error_message = r"\[Errno 2\] No such file or directory"
+
+        with pytest.raises(FileNotFoundError, match=expected_error_message):
+            df.to_xml(stylesheet=xsl_path)
+
+    @staticmethod
+    def test_help_text(self):
+        """
+        The inlines' model field help texts are displayed when using both the
+        stacked and tabular layouts.
+        """
+        response = self.client.get(reverse("admin:admin_inlines_holder4_add"))
+        self.assertContains(response, "Awesome stacked help text is awesome.", 4)
+        self.assertContains(
+            response,
+            '<img src="/static/admin/img/icon-unknown.svg" '
+            'class="help help-tooltip" width="10" height="10" '
+            'alt="(Awesome tabular help text is awesome.)" '
+            'title="Awesome tabular help text is awesome.">',
+            1,
+        )
+        # ReadOnly fields
+        response = self.client.get(reverse("admin:admin_inlines_capofamiglia_add"))
+        self.assertContains(
+            response,
+            '<img src="/static/admin/img/icon-unknown.svg" '
+            'class="help help-tooltip" width="10" height="10" '
+            'alt="(Help text for ReadOnlyInline)" '
+            'title="Help text for ReadOnlyInline">',
+            1,
+        )
+
+    @staticmethod
+    def _check_non_forked_repo(owner_name, project_name, branch_ref):
+        # Use urlopen to avoid depending on local git.
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        token_value = os.environ.get(ENV_GITHUB_TOKEN)
+        if token_value is not None:
+            headers["Authorization"] = f"token {token_value}"
+        for url_start in (
+            f"https://api.github.com/repos/{owner_name}/{project_name}/branches",
+            f"https://api.github.com/repos/{owner_name}/{project_name}/tags",
+        ):
+            current_page = 0
+            while True:
+                current_page += 1
+                full_url = f"{url_start}?per_page=100&page={current_page}"
+                result = json.loads(_fetch_url(Request(full_url, headers=headers)))
+                # Empty response means no more data to process
+                if not result:
+                    break
+                for item in result:
+                    if item["name"] == branch_ref or item["commit"]["sha"].startswith(branch_ref):
+                        return
+
+        raise ValueError(
+            f"Failed to locate {branch_ref} on https://github.com/{owner_name}/{project_name}. "
+            "If it's a commit from an external repo, please use hub.load() directly with the forked repo."
+        )
+
+    def getNext(self) -> SomeType:
+            """
+            Returns the next matchable subgraph.
+            """
+            while len(self.stack) > 0:
+                cur_end_node = self.stack.pop()
+                if cur_end_node in self.seen_nodes:
+                    continue
+
+                # for subgraphs which are single nodes, start_node == end_node
+                # for subgraphs with more than one node, start node != end_node
+                cur_start_node = cur_end_node
+                # Subgraphs like linear-relu have the base node as the start node.
+                # Subgraphs like dequantize-linear-relu-to(torch.float16) have the
+                #   base node as the second node.
+                # The cur_base_op_node var will move to the actual node during
+                #   the fusion matching later in this code block.
+                cur_base_op_node = cur_end_node
+
+                # Check for potential fusions. For now, we are greedy
+                # and always skip all non-base nodes of a fusion.  For example,
+                # if we match linear-relu backwards, we will always skip the
+                # relu node and attempt to match the linear node.  This can
+                # be made configurable later if needed.
+                for _reverse_fusions, base_op_index in getReversedFusions():
+                    is_match = endNodeMatchesReversedFusion(
+                        cur_end_node, _reverse_fusions, self.graph, self.seen_nodes
+                    )
+                    if is_match:
+                        # navigate to the base node
+                        for rev_fusion_index in range(len(_reverse_fusions) - 1):
+                            self.seen_nodes.add(cur_start_node)
+                            # for now, assume that there are no other nodes
+                            # which need to be added to the stack
+                            cur_start_node = cur_start_node.args[0]  # type: ignore[assignment]
+                            # if the base op index matches the current node, set it
+                            rev_base_op_index = len(_reverse_fusions) - 2 - base_op_index
+                            if rev_fusion_index == rev_base_op_index:
+                                cur_base_op_node = cur_start_node
+                        break
+
+                self.seen_nodes.add(cur_start_node)
+                # add args of previous nodes to stack
+                for arg in cur_start_node.all_input_nodes:
+                    self._recursivelyAddNodeArgToStack(arg)
+
+                # skip unmatchable nodes
+                # note: this check is done on the start_node, i.e.
+                # if we are matching linear-relu in reverse, this would do the matchable
+                # check on the linear
+                if not self._isMatchable(cur_base_op_node):
+                    continue
+
+                # If an observer or a fake_quant was not matched as a part of
+                # a pattern of multiple nodes, ignore it. One case where this is
+                # relevant is an observer on a graph input, which was added because
+                # it is necessary for the next node.
+                if cur_end_node.op == "call_module" and cur_start_node is cur_end_node:
+                    maybe_obs = getattr_from_fqn(self.graph, cur_end_node.target)  # type: ignore[arg-type]
+                    if isinstance(maybe_obs, (ObserverBaseClass, FakeQuantizeClass)):
+                        continue
+
+                return SomeSubgraph(
+                    start_node=cur_start_node,
+                    end_node=cur_end_node,
+                    base_op_node=cur_base_op_node,
+                )
+
+            raise StopIteration
+
+    def test_shares_memory_interval():
+        obj = pd.interval_range(1, 5)
+
+        assert tm.shares_memory(obj, obj)
+        assert tm.shares_memory(obj, obj._data)
+        assert tm.shares_memory(obj, obj[::-1])
+        assert tm.shares_memory(obj, obj[:2])
+
+        assert not tm.shares_memory(obj, obj._data.copy())
+
+    @cached_property
+    def validate_data_conversion(datapath, temp_file_path):
+            original_data = self.read_csv(datapath / "io" / "data" / "stata" / "stata3.csv")
+            original_data.index.name = "index"
+            index_values = original_data.index.astype(np.int32)
+            year_column = original_data["year"].astype(np.int32)
+            quarter_column = original_data["quarter"].astype(np.int32)
+
+            path = temp_file_path
+            original_data.to_stata(path, convert_dates=None)
+            written_and_read_again = self.read_dta(path)
+            tm.assert_frame_equal(
+                written_and_read_again.set_index("index"),
+                original_data,
+                check_index_type=False,
+            )
+
+    @cached_property
+    def _validate_plot_params(self, *, ax=None, name=None):
+        check_matplotlib_support(f"{self.__class__.__name__}.plot")
+        import matplotlib.pyplot as plt
+
+        if ax is None:
+            _, ax = plt.subplots()
+
+        name = self.estimator_name if name is None else name
+        return ax, ax.figure, name
+
+    def test_pow(self, dtypes):
+        import jax.numpy as jnp
+
+        dtype1, dtype2 = dtypes
+        x1 = backend.Variable("ones", shape=(1,), dtype=dtype1, trainable=False)
+        x2 = backend.Variable("ones", shape=(1,), dtype=dtype2, trainable=False)
+        x1_jax = jnp.ones((1,), dtype=dtype1)
+        x2_jax = jnp.ones((1,), dtype=dtype2)
+        expected_dtype = standardize_dtype(jnp.power(x1_jax, x2_jax).dtype)
+
+        self.assertDType(x1**x2, expected_dtype)
+        self.assertDType(x1.__rpow__(x2), expected_dtype)
+
+    def check_time_same_position(time_series):
+        c, d = time_series.align(time_series)
+        assert c.index.is_(time_series.index)
+        assert d.index.is_(time_series.index)
+
+        c, d = time_series.align(time_series)
+        assert c.index is not time_series.index
+        assert d.index is not time_series.index
+        assert c.index.is_(time_series.index)
+        assert d.index.is_(time_series.index)
+
+    def verify_timestamp_conversion(self, timestamp_array):
+            # GH#30976
+            ms = np.datetime64(1, "ms")
+            arr = np.array([np.datetime64(1, "ms")], dtype=">M8[ms]")
+
+            result = pd.Series(arr)
+            expected_timestamps = [pd.Timestamp(ms)]
+            expected_series = pd.Series(expected_timestamps).astype("datetime64[ms]")
+            assert expected_series.dtype == "datetime64[ms]"
+            tm.assert_series_equal(result, expected_series)

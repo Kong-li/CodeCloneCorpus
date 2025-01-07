@@ -1,0 +1,2 @@
+path,start_line,end_line,component,oss_path,oss_start_line,oss_end_line
+ads.h,62,66,mindspore,tests/ut/cpp/serving/acl_stub.c,171,175
